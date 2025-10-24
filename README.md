@@ -1,6 +1,6 @@
 ## (ICLR 2024) Pathformer: Multi-scale Transformers with Adaptive Pathways for Time Series Forecasting
 
-This code is a PyTorch implementation of our ICLR'24 paper "Pathformer: Multi-scale Transformers with Adaptive Pathways for Time Series Forecasting". [[arXiv]](https://arxiv.org/abs/2402.05956)
+This code is a PyTorch implementation of high performance training for "Pathformer: Multi-scale Transformers with Adaptive Pathways for Time Series Forecasting".
 
 🌟 Pathformer代码在阿里云仓库也进行同步更新：[阿里云Pathformer代码链接](https://github.com/alibaba/sreworks-ext/tree/main/aiops/Pathformer_ICLR2024)
 
