@@ -73,15 +73,22 @@ if __name__ == '__main__':
     parser.add_argument('--devices', type=str, default='2', help='device ids of multile gpus')
     parser.add_argument('--test_flop', action='store_true', default=False, help='See utils/tools for usage')
 
+    # DDP
+    parser.add_argument('--world_size', type=int, default=1, help='number of nodes for distributed training')
+    parser.add_argument('--rank', type=int, default=0, help='node rank for distributed training')
+    parser.add_argument('--dist_url', type=str, default='tcp://localhost:23456', help='url used to set up distributed training')
+    parser.add_argument('--dist_backend', type=str, default='nccl', help='distributed backend')
+    parser.add_argument('--local_rank', type=int, default=-1, help='local rank for distributed training')
+
     args = parser.parse_args()
     args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
 
     if args.use_gpu and args.use_multi_gpu:
-        args.dvices = args.devices.replace(' ', '')
+        args.devices = args.devices.replace(' ', '')
         device_ids = args.devices.split(',')
         args.device_ids = [int(id_) for id_ in device_ids]
         args.gpu = args.device_ids[0]
-
+    print('device_ids', args.device_ids if args.use_multi_gpu else args.gpu)
     args.patch_size_list = np.array(args.patch_size_list).reshape(args.layer_nums, -1).tolist()
 
     print('Args in experiment:')

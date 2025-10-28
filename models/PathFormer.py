@@ -9,7 +9,7 @@ from layers.Layer import WeightGenerator, CustomLinear
 from layers.RevIN import RevIN
 from functools import reduce
 from operator import mul
-
+import nvtx
 
 class Model(nn.Module):
     def __init__(self, configs):
@@ -43,26 +43,37 @@ class Model(nn.Module):
         )
 
     def forward(self, x):
-
         balance_loss = 0
+        
         # norm
+        nvtx.push_range("RevIN_Normalize")
         if self.revin:
             x = self.revin_layer(x, 'norm')
+        nvtx.pop_range()  # RevIN_Normalize
+        
+        nvtx.push_range("Start_Linear")
         out = self.start_fc(x.unsqueeze(-1))
-
+        nvtx.pop_range()  # Start_Linear
 
         batch_size = x.shape[0]
 
-        for layer in self.AMS_lists:
+        # AMS层循环
+        for i, layer in enumerate(self.AMS_lists):
+            nvtx.push_range(f"AMS_Layer_{i}")
             out, aux_loss = layer(out)
             balance_loss += aux_loss
+            nvtx.pop_range()  # AMS_Layer_{i}
 
+        nvtx.push_range("Reshape_Operations")
         out = out.permute(0,2,1,3).reshape(batch_size, self.num_nodes, -1)
         out = self.projections(out).transpose(2, 1)
+        nvtx.pop_range()  # Reshape_Operations
 
         # denorm
+        nvtx.push_range("RevIN_Denormalize")
         if self.revin:
             out = self.revin_layer(out, 'denorm')
+        nvtx.pop_range()  # RevIN_Denormalize
 
         return out, balance_loss
 

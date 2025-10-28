@@ -35,8 +35,11 @@ class Exp_Main(Exp_Basic):
         return model
 
     def _get_data(self, flag):
+        start_time = time.time()
         data_set, data_loader = data_provider(self.args, flag)
-        return data_set, data_loader
+        load_time = time.time() - start_time
+        print(f"Data loading time for {flag}: {load_time:.4f} seconds")
+        return data_set, data_loader, load_time
 
     def _select_optimizer(self):
         model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
@@ -86,9 +89,17 @@ class Exp_Main(Exp_Basic):
         return total_loss
 
     def train(self, setting):
-        train_data, train_loader = self._get_data(flag='train')
-        vali_data, vali_loader = self._get_data(flag='val')
-        test_data, test_loader = self._get_data(flag='test')
+        # 统计数据加载时间
+        load_start_time = time.time()
+        train_data, train_loader, train_load_time = self._get_data(flag='train')
+        vali_data, vali_loader, vali_load_time = self._get_data(flag='val')
+        test_data, test_loader, test_load_time = self._get_data(flag='test')
+        total_load_time = time.time() - load_start_time
+        
+        print(f"Total data loading time: {total_load_time:.4f} seconds")
+        print(f"Train data loading time: {train_load_time:.4f} seconds")
+        print(f"Validation data loading time: {vali_load_time:.4f} seconds")
+        print(f"Test data loading time: {test_load_time:.4f} seconds")
 
         path = os.path.join(self.args.checkpoints, setting)
         if not os.path.exists(path):
@@ -112,12 +123,23 @@ class Exp_Main(Exp_Basic):
                                             epochs=self.args.train_epochs,
                                             max_lr=self.args.learning_rate)
 
+        # 记录每个epoch的数据加载时间
+        epoch_load_times = []
+        
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
             self.model.train()
             epoch_time = time.time()
+            
+            # 记录每个batch的数据加载时间
+            batch_load_times = []
+            
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
+                batch_load_end = time.time()
+                batch_load_time = batch_load_end - epoch_time if i == 0 else batch_load_end - batch_start_time
+                batch_load_times.append(batch_load_time)
+                
                 iter_count += 1
                 model_optim.zero_grad()
                 batch_x = batch_x.float().to(self.device)
@@ -125,8 +147,6 @@ class Exp_Main(Exp_Basic):
                 batch_y = batch_y.float().to(self.device)
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
-
-
 
                 # encoder - decoder
                 if self.args.use_amp:
@@ -155,7 +175,9 @@ class Exp_Main(Exp_Basic):
                     train_loss.append(loss.item())
 
                 if (i + 1) % 100 == 0:
-                    print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
+                    avg_batch_load_time = np.mean(batch_load_times[-100:]) if len(batch_load_times) >= 100 else np.mean(batch_load_times)
+                    print("\titers: {0}, epoch: {1} | loss: {2:.7f} | avg batch load time: {3:.4f}s".format(
+                        i + 1, epoch + 1, loss.item(), avg_batch_load_time))
                     speed = (time.time() - time_now) / iter_count
                     left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
                     print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
@@ -173,8 +195,15 @@ class Exp_Main(Exp_Basic):
                 if self.args.lradj == 'TST':
                     adjust_learning_rate(model_optim, scheduler, epoch + 1, self.args, printout=False)
                     scheduler.step()
+                
+                # 记录当前batch结束时间，用于计算下一个batch的加载时间
+                batch_start_time = time.time()
 
-            print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
+            epoch_load_time = np.sum(batch_load_times)
+            epoch_load_times.append(epoch_load_time)
+            
+            print("Epoch: {} cost time: {}, data loading time: {}".format(
+                epoch + 1, time.time() - epoch_time, epoch_load_time))
             train_loss = np.average(train_loss)
             vali_loss = self.vali(vali_data, vali_loader, criterion)
             test_loss = self.vali(test_data, test_loader, criterion)
@@ -191,13 +220,23 @@ class Exp_Main(Exp_Basic):
             else:
                 print('Updating learning rate to {}'.format(scheduler.get_last_lr()[0]))
 
+        # 输出数据加载时间统计
+        if epoch_load_times:
+            avg_epoch_load_time = np.mean(epoch_load_times)
+            total_epoch_load_time = np.sum(epoch_load_times)
+            print(f"\nData Loading Time Statistics:")
+            print(f"Total epoch data loading time: {total_epoch_load_time:.4f} seconds")
+            print(f"Average epoch data loading time: {avg_epoch_load_time:.4f} seconds")
+            print(f"Max epoch data loading time: {np.max(epoch_load_times):.4f} seconds")
+            print(f"Min epoch data loading time: {np.min(epoch_load_times):.4f} seconds")
+
         best_model_path = path + '/' + 'checkpoint.pth'
         self.model.load_state_dict(torch.load(best_model_path))
         return self.model
 
-
     def test(self, setting, test=0):
-        test_data, test_loader = self._get_data(flag='test')
+        test_data, test_loader, test_load_time = self._get_data(flag='test')
+        print(f"Test data loading time: {test_load_time:.4f} seconds")
 
         if test:
             print('loading model')
@@ -273,7 +312,8 @@ class Exp_Main(Exp_Basic):
         return
 
     def predict(self, setting, load=False):
-        pred_data, pred_loader = self._get_data(flag='pred')
+        pred_data, pred_loader, pred_load_time = self._get_data(flag='pred')
+        print(f"Prediction data loading time: {pred_load_time:.4f} seconds")
 
         if load:
             path = os.path.join(self.args.checkpoints, setting)

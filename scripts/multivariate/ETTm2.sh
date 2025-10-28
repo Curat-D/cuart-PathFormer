@@ -14,7 +14,7 @@ model_id_name=ETTm2
 data_name=ETTm2
 
 
-for pred_len in 96 192 336 720
+for pred_len in 96
 do
     python -u run.py \
       --is_training 1 \
@@ -32,8 +32,8 @@ do
       --k 2\
       --d_model 16 \
       --d_ff 64 \
-      --train_epochs 30\
-      --patience 10\
+      --train_epochs 1\
+      --patience 3\
       --lradj 'TST'\
       --itr 1 \
       --batch_size 512 --learning_rate 0.001 >logs/LongForecasting/$model_name'_'$model_id_name'_'$seq_len'_'$pred_len.log
