@@ -6,10 +6,14 @@ from torch.distributions.normal import Normal
 import numpy as np
 from layers.AMS import AMS
 from layers.Layer import WeightGenerator, CustomLinear
+#from layers.Fused_RevIN import FusedRevIN as RevIN
 from layers.RevIN import RevIN
+#from layers.Optimized_AMS import OptimizedAMS as AMS
+#from layers.Optimized_Layer import WeightGenerator, CustomLinear
 from functools import reduce
 from operator import mul
 import nvtx
+
 
 class Model(nn.Module):
     def __init__(self, configs):
@@ -76,5 +80,3 @@ class Model(nn.Module):
         nvtx.pop_range()  # RevIN_Denormalize
 
         return out, balance_loss
-
-

@@ -1,6 +1,7 @@
 from data_provider.data_loader import Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Custom, Dataset_Pred,Dataset_Pretrain
 from torch.utils.data import DataLoader
-
+import torch
+import nvtx
 data_dict = {
     'ETTh1': Dataset_ETT_hour,
     'ETTh2': Dataset_ETT_hour,
@@ -49,6 +50,8 @@ def data_provider(args, flag):
         batch_size=batch_size,
         shuffle=shuffle_flag,
         num_workers=args.num_workers,
+        pin_memory=True,  # 启用pin memory
+        persistent_workers=True if args.num_workers > 0 else False,  # 保持worker进程
         drop_last=drop_last)
         
     return data_set, data_loader

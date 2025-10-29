@@ -4,7 +4,7 @@ from torch.utils.data import Dataset
 from sklearn.preprocessing import StandardScaler
 from utils.timefeatures import time_features
 import warnings
-
+import numpy as np
 warnings.filterwarnings('ignore')
 
 class Dataset_ETT_hour(Dataset):
@@ -171,7 +171,13 @@ class Dataset_ETT_minute(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
-        return seq_x, seq_y, seq_x_mark, seq_y_mark
+        # 确保返回float32类型，减少后续类型转换
+        return (
+            seq_x.astype(np.float32), 
+            seq_y.astype(np.float32), 
+            seq_x_mark.astype(np.float32), 
+            seq_y_mark.astype(np.float32)
+        )
 
     def __len__(self):
         return len(self.data_x) - self.seq_len - self.pred_len + 1

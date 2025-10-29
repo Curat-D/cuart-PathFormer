@@ -16,7 +16,7 @@ import time
 import warnings
 import matplotlib.pyplot as plt
 import numpy as np
-
+import nvtx
 warnings.filterwarnings('ignore')
 
 
@@ -91,9 +91,12 @@ class Exp_Main(Exp_Basic):
     def train(self, setting):
         # 统计数据加载时间
         load_start_time = time.time()
-        train_data, train_loader, train_load_time = self._get_data(flag='train')
-        vali_data, vali_loader, vali_load_time = self._get_data(flag='val')
-        test_data, test_loader, test_load_time = self._get_data(flag='test')
+        
+        with nvtx.annotate("Data Loading", color="red"):
+            train_data, train_loader, train_load_time = self._get_data(flag='train')
+            vali_data, vali_loader, vali_load_time = self._get_data(flag='val')
+            test_data, test_loader, test_load_time = self._get_data(flag='test')
+        
         total_load_time = time.time() - load_start_time
         
         print(f"Total data loading time: {total_load_time:.4f} seconds")
@@ -123,115 +126,118 @@ class Exp_Main(Exp_Basic):
                                             epochs=self.args.train_epochs,
                                             max_lr=self.args.learning_rate)
 
-        # 记录每个epoch的数据加载时间
-        epoch_load_times = []
+        # 创建专用的传输stream
+        transfer_stream = torch.cuda.Stream()
         
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
-            self.model.train()
-            epoch_time = time.time()
             
-            # 记录每个batch的数据加载时间
-            batch_load_times = []
-            
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
-                batch_load_end = time.time()
-                batch_load_time = batch_load_end - epoch_time if i == 0 else batch_load_end - batch_start_time
-                batch_load_times.append(batch_load_time)
+            with nvtx.annotate(f"Epoch_{epoch}_Train", color="blue"):
+                self.model.train()
+                epoch_time = time.time()
                 
-                iter_count += 1
-                model_optim.zero_grad()
-                batch_x = batch_x.float().to(self.device)
+                for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
+                    iter_count += 1
+                    
+                    with nvtx.annotate("Optimizer Zero Grad", color="yellow"):
+                        model_optim.zero_grad()
 
-                batch_y = batch_y.float().to(self.device)
-                batch_x_mark = batch_x_mark.float().to(self.device)
-                batch_y_mark = batch_y_mark.float().to(self.device)
+                    # 数据加载到GPU
+                    with nvtx.annotate("Data to GPU", color="green"):
+                        # 使用特定的stream进行异步传输
+                        with torch.cuda.stream(transfer_stream):
+                            batch_x = batch_x.float().to(self.device, non_blocking=True)
+                            batch_y = batch_y.float().to(self.device, non_blocking=True)
+                            batch_x_mark = batch_x_mark.float().to(self.device, non_blocking=True)
+                            batch_y_mark = batch_y_mark.float().to(self.device, non_blocking=True)
+                        
+                        # 等待数据传输完成
+                        torch.cuda.current_stream().wait_stream(transfer_stream)
 
-                # encoder - decoder
-                if self.args.use_amp:
-                    with torch.cuda.amp.autocast():
-                        if self.args.model=='PathFormer':
-                            outputs, balance_loss = self.model(batch_x)
+                    # 前向传播
+                    with nvtx.annotate("Forward Pass", color="purple"):
+                        if self.args.use_amp:
+                            with torch.cuda.amp.autocast():
+                                if self.args.model=='PathFormer':
+                                    outputs, balance_loss = self.model(batch_x)
+                                else:
+                                    outputs = self.model(batch_x)
+
+                                f_dim = -1 if self.args.features == 'MS' else 0
+                                outputs = outputs[:, -self.args.pred_len:, f_dim:]
+                                batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                                loss = criterion(outputs, batch_y)
+                                train_loss.append(loss.item())
                         else:
-                            outputs = self.model(batch_x)
+                            if self.args.model == 'PathFormer':
+                                outputs, balance_loss = self.model(batch_x)
+                            else:
+                                outputs = self.model(batch_x)
+                            f_dim = -1 if self.args.features == 'MS' else 0
+                            outputs = outputs[:, -self.args.pred_len:, f_dim:]
+                            batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                            loss = criterion(outputs, batch_y)
+                            if self.args.model=="PathFormer":
+                                loss = loss + balance_loss
+                            train_loss.append(loss.item())
 
-                        f_dim = -1 if self.args.features == 'MS' else 0
-                        outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                        batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                        loss = criterion(outputs, batch_y)
-                        train_loss.append(loss.item())
-                else:
-                    if self.args.model == 'PathFormer':
-                        outputs, balance_loss = self.model(batch_x)
-                    else:
-                        outputs = self.model(batch_x)
-                    f_dim = -1 if self.args.features == 'MS' else 0
-                    outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                    batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                    loss = criterion(outputs, batch_y)
-                    if self.args.model=="PathFormer":
-                        loss = loss + balance_loss
-                    train_loss.append(loss.item())
+                    # 日志输出
+                    if (i + 1) % 100 == 0:
+                        print("\titers: {0}, epoch: {1} | loss: {2:.7f} ".format(
+                            i + 1, epoch + 1, loss.item()))
+                        speed = (time.time() - time_now) / iter_count
+                        left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
+                        print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
+                        iter_count = 0
+                        time_now = time.time()
 
-                if (i + 1) % 100 == 0:
-                    avg_batch_load_time = np.mean(batch_load_times[-100:]) if len(batch_load_times) >= 100 else np.mean(batch_load_times)
-                    print("\titers: {0}, epoch: {1} | loss: {2:.7f} | avg batch load time: {3:.4f}s".format(
-                        i + 1, epoch + 1, loss.item(), avg_batch_load_time))
-                    speed = (time.time() - time_now) / iter_count
-                    left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
-                    print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
-                    iter_count = 0
-                    time_now = time.time()
+                    # 反向传播
+                    with nvtx.annotate("Backward Pass", color="orange"):
+                        if self.args.use_amp:
+                            scaler.scale(loss).backward()
+                            scaler.step(model_optim)
+                            scaler.update()
+                        else:
+                            loss.backward()
+                            model_optim.step()
 
-                if self.args.use_amp:
-                    scaler.scale(loss).backward()
-                    scaler.step(model_optim)
-                    scaler.update()
-                else:
-                    loss.backward()
-                    model_optim.step()
+                    # 学习率调整
+                    with nvtx.annotate("Learning Rate Adjustment", color="pink"):
+                        if self.args.lradj == 'TST':
+                            adjust_learning_rate(model_optim, scheduler, epoch + 1, self.args, printout=False)
+                            scheduler.step()
 
-                if self.args.lradj == 'TST':
-                    adjust_learning_rate(model_optim, scheduler, epoch + 1, self.args, printout=False)
-                    scheduler.step()
-                
-                # 记录当前batch结束时间，用于计算下一个batch的加载时间
-                batch_start_time = time.time()
 
-            epoch_load_time = np.sum(batch_load_times)
-            epoch_load_times.append(epoch_load_time)
-            
-            print("Epoch: {} cost time: {}, data loading time: {}".format(
-                epoch + 1, time.time() - epoch_time, epoch_load_time))
+            print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(train_loss)
-            vali_loss = self.vali(vali_data, vali_loader, criterion)
-            test_loss = self.vali(test_data, test_loader, criterion)
+            
+            # 验证阶段
+            with nvtx.annotate(f"Epoch_{epoch}_Validation", color="cyan"):
+                vali_loss = self.vali(vali_data, vali_loader, criterion)
+                test_loss = self.vali(test_data, test_loader, criterion)
 
             print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
                 epoch + 1, train_steps, train_loss, vali_loss, test_loss))
-            early_stopping(vali_loss, self.model, path)
-            if early_stopping.early_stop:
-                print("Early stopping")
-                break
+            
+            with nvtx.annotate("Early Stopping Check", color="brown"):
+                early_stopping(vali_loss, self.model, path)
+                if early_stopping.early_stop:
+                    print("Early stopping")
+                    break
 
-            if self.args.lradj != 'TST':
-                adjust_learning_rate(model_optim, scheduler, epoch + 1, self.args)
-            else:
-                print('Updating learning rate to {}'.format(scheduler.get_last_lr()[0]))
+            # 学习率调整
+            with nvtx.annotate("Epoch End LR Adjust", color="pink"):
+                if self.args.lradj != 'TST':
+                    adjust_learning_rate(model_optim, scheduler, epoch + 1, self.args)
+                else:
+                    print('Updating learning rate to {}'.format(scheduler.get_last_lr()[0]))
 
-        # 输出数据加载时间统计
-        if epoch_load_times:
-            avg_epoch_load_time = np.mean(epoch_load_times)
-            total_epoch_load_time = np.sum(epoch_load_times)
-            print(f"\nData Loading Time Statistics:")
-            print(f"Total epoch data loading time: {total_epoch_load_time:.4f} seconds")
-            print(f"Average epoch data loading time: {avg_epoch_load_time:.4f} seconds")
-            print(f"Max epoch data loading time: {np.max(epoch_load_times):.4f} seconds")
-            print(f"Min epoch data loading time: {np.min(epoch_load_times):.4f} seconds")
-
-        best_model_path = path + '/' + 'checkpoint.pth'
-        self.model.load_state_dict(torch.load(best_model_path))
+        # 加载最佳模型
+        with nvtx.annotate("Load Best Model", color="gray"):
+            best_model_path = path + '/' + 'checkpoint.pth'
+            self.model.load_state_dict(torch.load(best_model_path))
+        
         return self.model
 
     def test(self, setting, test=0):
