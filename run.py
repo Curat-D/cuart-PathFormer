@@ -1,18 +1,94 @@
+# run.py:
 import torch
 import numpy as np
 import random
 from exp.exp_main import Exp_Main
 import argparse
 import time
+import os
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 fix_seed = 1024
 random.seed(fix_seed)
 torch.manual_seed(fix_seed)
 np.random.seed(fix_seed)
 
+def setup(rank, world_size):
+    """设置分布式训练环境"""
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    
+    # 初始化进程组
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    
+    # 设置当前GPU
+    torch.cuda.set_device(rank)
+
+def cleanup():
+    """清理分布式训练环境"""
+    dist.destroy_process_group()
+
+def run_training(rank, world_size, args):
+    """在单个GPU上运行训练"""
+    setup(rank, world_size)
+    
+    # 为每个进程设置不同的随机种子
+    torch.manual_seed(fix_seed + rank)
+    np.random.seed(fix_seed + rank)
+    random.seed(fix_seed + rank)
+    
+    print(f"Running DDP on rank {rank}.")
+    
+    # 修改设备设置
+    args.use_gpu = True
+    args.gpu = rank
+    args.rank = rank
+    args.world_size = world_size
+    
+    # 处理patch_size_list
+    args.patch_size_list = np.array(args.patch_size_list).reshape(args.layer_nums, -1).tolist()
+
+    print(f'Args in experiment (rank {rank}):')
+    print(args)
+
+    Exp = Exp_Main
+
+    if args.is_training:
+        for ii in range(args.itr):
+            # setting record of experiments
+            setting = '{}_{}_ft{}_sl{}_pl{}_{}'.format(
+                args.model_id,
+                args.model,
+                args.data_path[:-4],
+                args.features,
+                args.seq_len,
+                args.pred_len, ii)
+
+            exp = Exp(args)  # set experiments
+
+            print(f'>>>>>>>start training : {setting} on rank {rank}>>>>>>>>>>>>>>>>>>>>>>>>>>')
+            exp.train(setting)
+
+            # 只在rank 0上执行测试和预测
+            if rank == 0:
+                time_now = time.time()
+                print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+                exp.test(setting)
+                print('Inference time: ', time.time() - time_now)
+
+                if args.do_predict:
+                    print('>>>>>>>predicting : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+                    exp.predict(setting, True)
+
+            # 等待所有进程完成
+            dist.barrier()
+            torch.cuda.empty_cache()
+    
+    cleanup()
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Multivariate Time Series Forecasting')
-
 
     # basic config
     parser.add_argument('--is_training', type=int, default=1, help='status')
@@ -54,7 +130,6 @@ if __name__ == '__main__':
     parser.add_argument('--metric', type=str, default='mae')
     parser.add_argument('--batch_norm', type=int, default=0)
 
-
     # optimization
     parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')
     parser.add_argument('--itr', type=int, default=1, help='experiments times')
@@ -69,8 +144,8 @@ if __name__ == '__main__':
     # GPU
     parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
     parser.add_argument('--gpu', type=int, default=0, help='gpu')
-    parser.add_argument('--use_multi_gpu', action='store_true', help='use multiple gpus', default=False)
-    parser.add_argument('--devices', type=str, default='2', help='device ids of multile gpus')
+    parser.add_argument('--use_ddp', action='store_true', help='use DDP for distributed training', default=False)
+    parser.add_argument('--devices', type=str, default='0,1', help='device ids for DDP training')
     parser.add_argument('--test_flop', action='store_true', default=False, help='See utils/tools for usage')
 
     # compile
@@ -78,27 +153,57 @@ if __name__ == '__main__':
     parser.add_argument('--compile_backend', type=str, default='inductor', help='backend for torch.compile')
     parser.add_argument('--compile_mode', type=str, default='default', help='mode for torch.compile')
 
-
-
     args = parser.parse_args()
     args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
 
-    if args.use_gpu and args.use_multi_gpu:
-        args.devices = args.devices.replace(' ', '')
-        device_ids = args.devices.split(',')
-        args.device_ids = [int(id_) for id_ in device_ids]
-        args.gpu = args.device_ids[0]
-    print('device_ids', args.device_ids if args.use_multi_gpu else args.gpu)
-    args.patch_size_list = np.array(args.patch_size_list).reshape(args.layer_nums, -1).tolist()
+    if args.use_ddp and args.use_gpu:
+        # 使用DDP时，设置world_size为GPU数量
+        world_size = torch.cuda.device_count()
+        print(f"Using DDP with {world_size} GPUs")
+        
+        # 启动多进程训练
+        mp.spawn(run_training,
+                 args=(world_size, args),
+                 nprocs=world_size,
+                 join=True)
+    else:
+        # 单GPU训练
+        if args.use_gpu:
+            torch.cuda.set_device(args.gpu)
+        
+        args.patch_size_list = np.array(args.patch_size_list).reshape(args.layer_nums, -1).tolist()
 
-    print('Args in experiment:')
-    print(args)
+        print('Args in experiment:')
+        print(args)
 
-    Exp = Exp_Main
+        Exp = Exp_Main
 
-    if args.is_training:
-        for ii in range(args.itr):
-            # setting record of experiments
+        if args.is_training:
+            for ii in range(args.itr):
+                setting = '{}_{}_ft{}_sl{}_pl{}_{}'.format(
+                    args.model_id,
+                    args.model,
+                    args.data_path[:-4],
+                    args.features,
+                    args.seq_len,
+                    args.pred_len, ii)
+
+                exp = Exp(args)
+                print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(setting))
+                exp.train(setting)
+
+                time_now = time.time()
+                print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+                exp.test(setting)
+                print('Inference time: ', time.time() - time_now)
+
+                if args.do_predict:
+                    print('>>>>>>>predicting : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+                    exp.predict(setting, True)
+
+                torch.cuda.empty_cache()
+        else:
+            ii = 0
             setting = '{}_{}_ft{}_sl{}_pl{}_{}'.format(
                 args.model_id,
                 args.model,
@@ -107,35 +212,7 @@ if __name__ == '__main__':
                 args.seq_len,
                 args.pred_len, ii)
 
-            exp = Exp(args)  # set experiments
-
-
-
-
-            print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(setting))
-            exp.train(setting)
-
-            time_now = time.time()
+            exp = Exp(args)
             print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
-            exp.test(setting)
-            print('Inference time: ', time.time() - time_now)
-
-            if args.do_predict:
-                print('>>>>>>>predicting : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
-                exp.predict(setting, True)
-
+            exp.test(setting, test=1)
             torch.cuda.empty_cache()
-    else:
-        ii = 0
-        setting = '{}_{}_ft{}_sl{}_pl{}_{}'.format(
-            args.model_id,
-            args.model,
-            args.data_path[:-4],
-            args.features,
-            args.seq_len,
-            args.pred_len, ii)
-
-        exp = Exp(args)  # set experiments
-        print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
-        exp.test(setting, test=1)
-        torch.cuda.empty_cache()
