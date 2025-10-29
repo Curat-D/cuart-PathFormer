@@ -31,7 +31,6 @@ class Exp_Main(Exp_Basic):
         }
         model = model_dict[self.args.model].Model(self.args).float()
 
-        '''
         # 使用torch.compile优化模型
         if self.args.use_compile:
             # 检查模型是否包含 FFT 操作
@@ -62,20 +61,10 @@ class Exp_Main(Exp_Basic):
                     mode='max-autotune',
                     dynamic=False,
                 )
-        '''
-        if self.args.use_compile:
-            print("Compiling the model with Torch Dynamo...")
-            model = torch.compile(
-                model,
-                backend='inductor',
-                mode='max-autotune',
-                dynamic=False,
-            )
-            print("Model compilation completed.")
+
 
         if self.args.use_multi_gpu and self.args.use_gpu:
             model = nn.DataParallel(model, device_ids=self.args.device_ids)
-        
         return model
 
     def _get_data(self, flag):
