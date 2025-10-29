@@ -18,7 +18,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import nvtx
 warnings.filterwarnings('ignore')
-
+import torch._dynamo as dynamo
+dynamo.config.suppress_errors = True  # 抑制错误
 
 class Exp_Main(Exp_Basic):
     def __init__(self, args):
@@ -30,8 +31,51 @@ class Exp_Main(Exp_Basic):
         }
         model = model_dict[self.args.model].Model(self.args).float()
 
+        '''
+        # 使用torch.compile优化模型
+        if self.args.use_compile:
+            # 检查模型是否包含 FFT 操作
+            def has_fft_operations(model):
+                for name, module in model.named_modules():
+                    if any('fft' in str(module).lower() for module in [module]):
+                        return True
+                return False
+            
+            if has_fft_operations(model):
+                print("Model contains FFT operations, using compatible compilation...")
+                # 使用兼容性更好的配置
+                import torch._dynamo as dynamo
+                dynamo.config.suppress_errors = True
+                
+                model = torch.compile(
+                    model,
+                    backend='aot_eager',
+                    mode='reduce-overhead',
+                    dynamic=False,
+                    fullgraph=False,
+                )
+            else:
+                print("Model doesn't contain FFT operations, using full optimization...")
+                model = torch.compile(
+                    model,
+                    backend='inductor',
+                    mode='max-autotune',
+                    dynamic=False,
+                )
+        '''
+        if self.args.use_compile:
+            print("Compiling the model with Torch Dynamo...")
+            model = torch.compile(
+                model,
+                backend='inductor',
+                mode='max-autotune',
+                dynamic=False,
+            )
+            print("Model compilation completed.")
+
         if self.args.use_multi_gpu and self.args.use_gpu:
             model = nn.DataParallel(model, device_ids=self.args.device_ids)
+        
         return model
 
     def _get_data(self, flag):
@@ -108,6 +152,21 @@ class Exp_Main(Exp_Basic):
         if not os.path.exists(path):
             os.makedirs(path)
 
+        # 在训练开始前进行模型编译warmup
+        if self.args.use_compile:
+            print("Warming up compiled model...")
+            with nvtx.annotate("Model_Compile_Warmup", color="magenta"):
+                # 使用一个虚拟输入进行warmup
+                with torch.cuda.amp.autocast(enabled=self.args.use_amp):
+                    dummy_batch = torch.randn(
+                        self.args.batch_size, 
+                        self.args.seq_len, 
+                        self.args.num_nodes if self.args.features == 'M' else 1,
+                        device=self.device
+                    )
+                    self.model(dummy_batch)
+            print("Model compilation warmup completed")
+
         total_num = sum(p.numel() for p in self.model.parameters())
         time_now = time.time()
 
@@ -145,7 +204,7 @@ class Exp_Main(Exp_Basic):
 
                     # 数据加载到GPU
                     with nvtx.annotate("Data to GPU", color="green"):
-                        # 使用特定的stream进行异步传输
+                        # 使用特定的stream进行传输
                         with torch.cuda.stream(transfer_stream):
                             batch_x = batch_x.float().to(self.device, non_blocking=True)
                             batch_y = batch_y.float().to(self.device, non_blocking=True)

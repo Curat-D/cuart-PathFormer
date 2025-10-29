@@ -32,7 +32,7 @@ do
       --k 2\
       --d_model 16 \
       --d_ff 64 \
-      --train_epochs 1\
+      --train_epochs 2\
       --patience 3\
       --lradj 'TST'\
       --itr 1 \

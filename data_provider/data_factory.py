@@ -50,8 +50,10 @@ def data_provider(args, flag):
         batch_size=batch_size,
         shuffle=shuffle_flag,
         num_workers=args.num_workers,
+        prefetch_factor=2,
         pin_memory=True,  # 启用pin memory
         persistent_workers=True if args.num_workers > 0 else False,  # 保持worker进程
         drop_last=drop_last)
         
     return data_set, data_loader
+

@@ -46,6 +46,53 @@ class SparseDispatcher(object):
         # split nonzero gates for each expert
         return torch.split(self._nonzero_gates, self._part_sizes, dim=0)
 
+class OptimizedSparseDispatcher(object):
+    def __init__(self, num_experts, gates):
+        """优化的SparseDispatcher"""
+        self._gates = gates
+        self._num_experts = num_experts
+
+        # 一次性计算所有索引
+        nonzero_indices = torch.nonzero(gates)
+        sorted_indices = nonzero_indices[:, 1].argsort()
+        sorted_experts = nonzero_indices[sorted_indices]
+        
+        self._expert_index = sorted_experts[:, 1:2]
+        self._batch_index = sorted_experts[:, 0]
+        self._part_sizes = (gates > 0).sum(0).tolist()
+        
+        # 预计算nonzero_gates
+        gates_exp = gates[self._batch_index]
+        self._nonzero_gates = torch.gather(gates_exp, 1, self._expert_index)
+
+    def dispatch(self, inp):
+        inp_exp = inp[self._batch_index]
+        return torch.split(inp_exp, self._part_sizes, dim=0)
+
+    def combine(self, expert_out, multiply_by_gates=True):
+        # 批量拼接和操作
+        stitched = torch.cat(expert_out, 0)
+        
+        if multiply_by_gates:
+            # 使用更高效的广播乘法
+            stitched = stitched * self._nonzero_gates.unsqueeze(-1).unsqueeze(-1)
+        
+        # 预分配输出张量
+        combined = torch.zeros(
+            self._gates.size(0), expert_out[-1].size(1), 
+            expert_out[-1].size(2), expert_out[-1].size(3),
+            device=stitched.device, dtype=stitched.dtype
+        )
+        
+        # 使用index_add_原地操作
+        combined.index_add_(0, self._batch_index, stitched)
+        
+        # 避免除零错误
+        combined = torch.where(combined == 0, torch.tensor(np.finfo(float).eps, device=combined.device), combined)
+        
+        return combined
+
+
 
 class MLP(nn.Module):
     def __init__(self, input_size, output_size):
